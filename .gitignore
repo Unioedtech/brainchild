@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+.env
+build/
+dist/
+.DS_Store
+.idea/
+.vscode/
+
+# Never check in user installs or secrets
+secrets/
+*.token
+init-state.json
