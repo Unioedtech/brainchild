@@ -66,7 +66,7 @@ def _register_macos() -> None:
 </dict>
 </plist>
 """
-    plist.write_text(content)
+    plist.write_text(content, encoding="utf-8")
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
     subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], check=True)
@@ -106,7 +106,7 @@ StandardError=append:{PATHS.logs_dir / 'systemd.log'}
 [Install]
 WantedBy=default.target
 """
-    unit.write_text(content)
+    unit.write_text(content, encoding="utf-8")
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
     subprocess.run(["systemctl", "--user", "enable", "--now", "brainchild"], check=True)
 

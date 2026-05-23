@@ -70,7 +70,7 @@ def _file_set(name: str, value: str) -> None:
         os.chmod(PATHS.secrets_dir, 0o700)
     f = PATHS.secrets_dir / f"{name}.json"
     tmp = f.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"value": value}))
+    tmp.write_text(json.dumps({"value": value}), encoding="utf-8")
     if sys.platform != "win32":
         os.chmod(tmp, 0o600)
     os.replace(tmp, f)
@@ -252,6 +252,6 @@ def write_settings_daemon(path: Path | None = None) -> Path:
         "permissions": {"deny": DEFAULT_DENY},
     }
     tmp = target.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(content, indent=2))
+    tmp.write_text(json.dumps(content, indent=2), encoding="utf-8")
     os.replace(tmp, target)
     return target

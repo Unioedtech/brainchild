@@ -53,7 +53,7 @@ class Scheduler:
     def _save(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.state))
+        tmp.write_text(json.dumps(self.state), encoding="utf-8")
         os.replace(tmp, self.state_path)
 
     def tick(self, now: float | None = None) -> int:

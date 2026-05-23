@@ -116,7 +116,7 @@ class TGClient:
     def _save_offset(self) -> None:
         PATHS.tg_offset.parent.mkdir(parents=True, exist_ok=True)
         tmp = PATHS.tg_offset.with_suffix(".tmp")
-        tmp.write_text(str(self._offset))
+        tmp.write_text(str(self._offset), encoding="utf-8")
         os.replace(tmp, PATHS.tg_offset)
 
     def ack_all(self) -> None:

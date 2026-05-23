@@ -34,7 +34,7 @@ def ensure_vault(vault: Path) -> None:
 def atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content)
+    tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -137,5 +137,5 @@ def drain_log_inbox(vault: Path) -> int:
     if not content.strip():
         return 0
     append_log(vault, content)
-    PATHS.pending_log.write_text("")
+    PATHS.pending_log.write_text("", encoding="utf-8")
     return len(content)

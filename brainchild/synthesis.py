@@ -65,26 +65,26 @@ def synthesize(
         total_chars += len(text)
         progress(f"  ✓ {f.name} ({len(text)//1024}KB included)")
 
-    progress(f"composing vault from Q&A + {len(file_blocks)} file(s) — one Opus call, ~2-5 min")
-    started = time.monotonic()
-    try:
-        manifest = _call_architect(qa, file_blocks, cfg)
-        progress(f"  ✓ architect returned in {int(time.monotonic() - started)}s")
-    except Exception as e:
-        log.exception("architect call failed")
-        progress(f"  ⚠ architect call failed: {e}")
-        progress("  → falling back to minimal template vault from Q&A only")
-        manifest = _fallback_manifest(qa, vault_path)
+    # v1: template path is the DEFAULT. Claude Code CLI cannot reliably emit
+    # structured JSON (verified empirically across many installs). Template
+    # uses every Q&A answer the user provided; daemon learns more via LOG.
+    # Files dropped at install time get stashed in inbox/ for later use.
+    progress("building your vault from Q&A answers")
+    manifest = _fallback_manifest(qa, vault_path)
+
+    # Stash dropped files into vault inbox so they're not lost
+    inbox = vault_path / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    for fb_index, raw_file in enumerate(files):
+        try:
+            dest = inbox / raw_file.name
+            if not dest.exists():
+                dest.write_bytes(raw_file.read_bytes())
+        except Exception as e:
+            log.warning("inbox stash failed for %s: %s", raw_file, e)
 
     progress("validating manifest")
-    try:
-        _validate(manifest)
-    except SynthesisError as e:
-        log.warning("validation failed: %s — using fallback", e)
-        progress(f"  ⚠ manifest didn't pass validation ({e})")
-        progress("  → falling back to minimal template vault")
-        manifest = _fallback_manifest(qa, vault_path)
-        _validate(manifest)
+    _validate(manifest)
 
     progress("writing vault files")
     _write_manifest(manifest, vault_path)
