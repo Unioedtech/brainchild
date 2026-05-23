@@ -1,15 +1,8 @@
 """Vault synthesis: Q&A + dropped files → fully populated vault.
 
-Two-phase:
-  A. Per-file digest (one Haiku call per file, sequential) → file-level summary
-  B. Vault architect (one Opus call) → JSON manifest → files on disk
-
-Design choices:
-- Haiku for digests because extracting identity/priorities from text doesn't
-  need Opus and Haiku is ~10× faster on the Pro plan.
-- One call per file (not chunked). Files truncated to MAX_FILE_CHARS.
-- Sequential to avoid Pro-tier rate-limit spikes.
-- A failing digest is skipped with a warning — never blocks the architect.
+ONE Opus call. No digest phase. Q&A + all file content (truncated) goes
+straight into the architect prompt. If the call fails, fall back to a
+minimal template vault from Q&A alone so install always completes.
 """
 from __future__ import annotations
 
@@ -17,6 +10,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +19,9 @@ from brainchild.config import Config
 
 log = logging.getLogger("brainchild.synthesis")
 
-MAX_FILE_CHARS = 60_000       # truncate large files; tail rarely adds signal
-DIGEST_TIMEOUT_SEC = 90       # Haiku is fast; 90s is generous
-ARCHITECT_TIMEOUT_SEC = 240   # Opus + bigger context, allow up to 4 min
-DIGEST_MODEL = "haiku"
+PER_FILE_MAX_CHARS = 30_000   # truncate each file
+TOTAL_FILES_MAX_CHARS = 80_000 # cap combined file content
+ARCHITECT_TIMEOUT_SEC = 360   # 6 minutes — generous for Pro rate limits + Opus
 ARCHITECT_MODEL = "opus"
 
 
@@ -50,31 +43,49 @@ def synthesize(
         if progress_cb:
             progress_cb(msg)
 
-    # Phase A: per-file digests — Haiku, sequential, one call per file
-    digests: list[dict[str, Any]] = []
+    # Inline file content — no separate digest calls
+    file_blocks: list[str] = []
+    total_chars = 0
     for f in files:
-        started = time.monotonic()
-        try:
-            progress(f"reading {f.name}")
-            digest = _digest_file(f, cfg)
-            if digest:
-                digests.append({"name": f.name, "digest": digest})
-                progress(f"  ✓ {f.name} digested in {int(time.monotonic() - started)}s")
-            else:
-                progress(f"  ⚠ {f.name} produced no signal — skipped")
-        except Exception as e:
-            log.warning("digest failed for %s: %s", f, e)
-            progress(f"  ⚠ {f.name} digest failed ({type(e).__name__}) — skipped, continuing")
+        progress(f"reading {f.name}")
+        text = _read_text(f)
+        if not text.strip():
+            progress(f"  ⚠ {f.name} had no extractable text — skipping")
+            continue
+        if len(text) > PER_FILE_MAX_CHARS:
+            text = text[:PER_FILE_MAX_CHARS]
+        if total_chars + len(text) > TOTAL_FILES_MAX_CHARS:
+            remaining = TOTAL_FILES_MAX_CHARS - total_chars
+            if remaining < 5000:
+                progress(f"  ⚠ {f.name} skipped — combined file budget exhausted")
+                break
+            text = text[:remaining]
+            progress(f"  ⚠ {f.name} truncated to fit budget")
+        file_blocks.append(f'<file name="{f.name}">\n{text}\n</file>')
+        total_chars += len(text)
+        progress(f"  ✓ {f.name} ({len(text)//1024}KB included)")
 
-    # Phase B: synthesis — Opus, single call
-    progress(f"composing vault from Q&A + {len(digests)} file digest(s)")
-    manifest = _call_architect(qa, digests, cfg)
+    progress(f"composing vault from Q&A + {len(file_blocks)} file(s) — one Opus call, ~2-5 min")
+    started = time.monotonic()
+    try:
+        manifest = _call_architect(qa, file_blocks, cfg)
+        progress(f"  ✓ architect returned in {int(time.monotonic() - started)}s")
+    except Exception as e:
+        log.exception("architect call failed")
+        progress(f"  ⚠ architect call failed: {e}")
+        progress("  → falling back to minimal template vault from Q&A only")
+        manifest = _fallback_manifest(qa, vault_path)
 
-    # Phase C: validate
     progress("validating manifest")
-    _validate(manifest)
+    try:
+        _validate(manifest)
+    except SynthesisError as e:
+        log.warning("validation failed: %s — using fallback", e)
+        progress(f"  ⚠ manifest didn't pass validation ({e})")
+        progress("  → falling back to minimal template vault")
+        manifest = _fallback_manifest(qa, vault_path)
+        _validate(manifest)
 
-    # Phase D: write files
     progress("writing vault files")
     _write_manifest(manifest, vault_path)
 
@@ -83,27 +94,12 @@ def synthesize(
 
 # ---- Phase A: per-file digest ------------------------------------------------
 
-def _digest_file(path: Path, cfg: Config) -> dict[str, Any]:
-    """One Haiku call per file. Truncate over MAX_FILE_CHARS."""
-    text = _read_text(path)
-    if not text.strip():
-        return {}
-    if len(text) > MAX_FILE_CHARS:
-        text = text[:MAX_FILE_CHARS]
-        log.info("truncated %s to %d chars", path.name, MAX_FILE_CHARS)
-    digest_prompt = prompts.load("file_digest.txt")
-    user = f"<file name=\"{path.name}\">\n{text}\n</file>"
-    out = claude_runner.run(
-        user, cfg, trigger="synth-digest",
-        cwd=Path.home(),
-        system_prompt=digest_prompt,
-        extra_args=["--model", DIGEST_MODEL],
-        timeout_override=DIGEST_TIMEOUT_SEC,
-    )
-    return _extract_json(out)
-
-
 def _read_text(path: Path) -> str:
+    # Forward to the existing reader below
+    return _read_text_impl(path)
+
+
+def _read_text_impl(path: Path) -> str:
     try:
         if path.suffix.lower() in (".md", ".txt", ".markdown", ".org"):
             return path.read_text(encoding="utf-8", errors="replace")
@@ -139,14 +135,14 @@ def _read_docx(path: Path) -> str:
 
 # ---- Phase B: architect call -------------------------------------------------
 
-def _call_architect(qa: dict[str, Any], digests: list[dict], cfg: Config) -> dict:
+def _call_architect(qa: dict[str, Any], file_blocks: list[str], cfg: Config) -> dict:
     system_prompt = prompts.load("vault_architect.txt")
     qa_block = json.dumps(qa, indent=2)
-    digests_block = json.dumps(digests, indent=2)
+    files_section = "\n\n".join(file_blocks) if file_blocks else "<none>"
     user = (
         f"<qa>\n{qa_block}\n</qa>\n\n"
-        f"<files>\n{digests_block}\n</files>\n\n"
-        f"Emit the JSON object now."
+        f"<files>\n{files_section}\n</files>\n\n"
+        f"Emit the JSON object now. Start with the opening curly brace."
     )
     out = claude_runner.run(
         user, cfg, trigger="synth-architect",
@@ -155,7 +151,7 @@ def _call_architect(qa: dict[str, Any], digests: list[dict], cfg: Config) -> dic
         extra_args=["--model", ARCHITECT_MODEL],
         timeout_override=ARCHITECT_TIMEOUT_SEC,
     )
-    log.info("architect raw output (first 800c): %s", (out or "")[:800])
+    log.info("architect raw output (first 1000c): %s", (out or "")[:1000])
     parsed = _extract_json(out)
     if not parsed:
         raise SynthesisError(f"architect returned unparseable output: {out[:600]}")
@@ -274,6 +270,210 @@ def _section(text: str, header: str) -> str:
     )
     m = pattern.search(text)
     return m.group(0) if m else ""
+
+
+# ---- Fallback template (when Claude call fails) ------------------------------
+
+def _fallback_manifest(qa: dict[str, Any], vault_path: Path) -> dict:
+    """Build a minimal but valid vault from Q&A alone. No LLM call."""
+    name = (qa.get("identity") or {}).get("name") or "<unknown>"
+    role = (qa.get("identity") or {}).get("role") or "<unknown — fill in>"
+    day_to_day = qa.get("day_to_day") or "<unknown — fill in>"
+    priorities_raw = (qa.get("priorities") or "").strip()
+    priority_lines = [p.strip("- ").strip() for p in priorities_raw.split("\n") if p.strip()]
+    while len(priority_lines) < 3:
+        priority_lines.append("<unknown — capture first thing tomorrow>")
+    push_back = qa.get("push_back") or []
+    never = qa.get("never_go_there") or "<none specified>"
+    numbers = qa.get("numbers") or ""
+    rhythm = qa.get("rhythm") or {}
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    push_back_list = "\n".join(f"- {p}" for p in push_back) if push_back else "- <none specified>"
+
+    persona = f"""---
+type: persona
+owner: {name}
+---
+
+# Persona
+
+## Identity
+- Name: {name}
+- Role: {role}
+
+## Voice
+- Tone: <fill in — terse / warm / formal / etc.>
+- Forbidden phrases: <fill in if any>
+
+## How to be
+- Lead with the answer
+- Cite a file or a number or stay quiet
+
+## Push-back rules
+{push_back_list}
+
+## Never-go-there
+- {never}
+
+## Domain context
+- Day-to-day: {day_to_day}
+"""
+
+    live = f"""---
+type: live
+---
+
+# Live
+
+## Today ({today})
+1. {priority_lines[0]}
+2. {priority_lines[1]}
+3. {priority_lines[2]}
+
+## Active streams
+- <fill in as you go>
+
+## Open inputs (awaiting)
+- <none yet>
+
+## Energy / constraints
+- <fill in your hours>
+
+## Recent decisions
+- <none yet>
+"""
+
+    backlog = """---
+type: backlog
+---
+
+# Backlog
+
+## Parked streams
+- <none>
+
+## Ideas
+- <none>
+
+## Someday/maybe
+- <none>
+
+## Deferred decisions
+- <none>
+"""
+
+    scoreboard = f"""---
+type: scoreboard
+---
+
+# Scoreboard
+
+## Targets
+| Metric | Current | Target | Deadline | Source |
+|---|---|---|---|---|
+| <fill in> | <?> | <?> | <?> | qa.numbers |
+
+## Streaks / cadence
+- <none yet>
+
+## Pressure clocks
+- <fill in>
+
+<!-- Raw numbers from install Q&A:
+{numbers}
+-->
+"""
+
+    log_md = "---\ntype: log\n---\n\n# Log\n<!-- append-only, newest on top -->\n"
+
+    am = rhythm.get("am") or "07:30"
+    midday = rhythm.get("midday") or "13:00"
+    precraft = rhythm.get("precraft") or "21:00"
+    night = rhythm.get("night") or "23:30"
+
+    briefings = f"""# Briefing recipes
+
+## AM
+- Fires: {am}
+- Lead with: top 3 from LIVE Today
+- Ask: What's the single hardest thing today?
+- Avoid: yesterday's noise
+- Tone: brisk
+
+## Midday
+- Fires: {midday}
+- Lead with: drift from Today
+- Ask: Still on the top item?
+- Avoid: new ideas
+- Tone: audit
+
+## Pre-craft
+- Fires: {precraft}
+- Lead with: which stream gets deep time
+- Ask: <none>
+- Avoid: status
+- Tone: silent runway
+
+## Night
+- Fires: {night}
+- Lead with: shipped vs slipped
+- Ask: push-back for tomorrow?
+- Avoid: scoreboards if bad day
+- Tone: honest, short
+"""
+
+    push_rules = f"""# Push-back rules
+
+## Hard fights
+{push_back_list}
+
+## Soft fights
+- Vague goals → demand specifics
+
+## Never fight
+- {never}
+"""
+
+    # Derive minimal streams from priorities
+    streams = []
+    for i, p in enumerate(priority_lines[:3]):
+        if "<unknown" in p:
+            continue
+        slug = re.sub(r"[^a-z0-9-]", "-", p.lower())[:40].strip("-") or f"stream-{i+1}"
+        streams.append({"slug": slug, "title": p[:60], "rationale": "qa.priorities"})
+    if len(streams) < 3:
+        for n in range(len(streams), 3):
+            streams.append({
+                "slug": f"unnamed-stream-{n+1}",
+                "title": f"Stream {n+1} (fill in)",
+                "rationale": "placeholder — rename me",
+            })
+
+    files = [
+        {"path": "agent/PERSONA.md", "content": persona},
+        {"path": "agent/LIVE.md", "content": live},
+        {"path": "agent/BACKLOG.md", "content": backlog},
+        {"path": "agent/SCOREBOARD.md", "content": scoreboard},
+        {"path": "agent/LOG.md", "content": log_md},
+        {"path": "agent/briefing-recipes.md", "content": briefings},
+        {"path": "agent/push-back-rules.md", "content": push_rules},
+    ]
+    for s in streams:
+        files.append({
+            "path": f"streams/{s['slug']}/README.md",
+            "content": f"# {s['title']}\n\n## Why this is a stream\n{s['rationale']}\n\n## Open threads\n- <fill in>\n\n## Last touched\n{today}\n",
+        })
+
+    return {
+        "streams": streams,
+        "files": files,
+        "warnings": [
+            "Vault built from FALLBACK TEMPLATE — Claude synthesis call failed or timed out.",
+            "Edit agent/PERSONA.md, agent/LIVE.md, agent/SCOREBOARD.md by hand to flesh out.",
+            "Re-run synthesis later with: python -m brainchild install (it will resume + redo synthesis).",
+        ],
+    }
 
 
 # ---- Phase D: write ----------------------------------------------------------
