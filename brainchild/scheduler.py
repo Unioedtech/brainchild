@@ -46,7 +46,7 @@ class Scheduler:
         if not self.state_path.exists():
             return {}
         try:
-            return json.loads(self.state_path.read_text())
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
 

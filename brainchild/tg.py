@@ -109,7 +109,7 @@ class TGClient:
 
     def _load_offset(self) -> int:
         try:
-            return int(PATHS.tg_offset.read_text().strip())
+            return int(PATHS.tg_offset.read_text(encoding="utf-8").strip())
         except (FileNotFoundError, ValueError):
             return 0
 

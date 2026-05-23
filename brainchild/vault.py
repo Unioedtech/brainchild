@@ -41,7 +41,7 @@ def atomic_write(path: Path, content: str) -> None:
 
 def read_safe(path: Path, default: str = "") -> str:
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return default
 
@@ -146,7 +146,7 @@ def drain_log_inbox(vault: Path) -> int:
     if not PATHS.pending_log.exists():
         return 0
     try:
-        content = PATHS.pending_log.read_text()
+        content = PATHS.pending_log.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return 0
     if not content.strip():

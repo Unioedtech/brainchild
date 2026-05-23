@@ -248,7 +248,7 @@ def _uninstall() -> int:
 
 def _config(args) -> int:
     if not args.key:
-        print(PATHS.config_file.read_text() if PATHS.config_file.exists() else "(no config)")
+        print(PATHS.config_file.read_text(encoding="utf-8") if PATHS.config_file.exists() else "(no config)")
         return 0
     print("(edit ~/.brainchild/config.toml directly; structured config writes coming in v0.2)")
     return 0

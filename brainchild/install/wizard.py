@@ -53,7 +53,7 @@ def run() -> None:
 def _load_state() -> dict[str, Any]:
     if PATHS.init_state.exists():
         try:
-            data = json.loads(PATHS.init_state.read_text())
+            data = json.loads(PATHS.init_state.read_text(encoding="utf-8"))
             if data.get("step") != "done":
                 ans = input(
                     f"\nFound an unfinished install (stopped at {data.get('step', 'unknown')}). "

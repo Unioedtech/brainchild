@@ -81,7 +81,7 @@ def _file_get(name: str) -> str | None:
     if not f.exists():
         return None
     try:
-        return json.loads(f.read_text()).get("value")
+        return json.loads(f.read_text(encoding="utf-8")).get("value")
     except Exception:
         return None
 
@@ -148,7 +148,7 @@ def audit_tail(n: int = 50) -> list[dict]:
     f = PATHS.audit_dir / f"{day}.jsonl"
     if not f.exists():
         return []
-    lines = f.read_text().splitlines()[-n:]
+    lines = f.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
     out = []
     for line in lines:
         try:
@@ -167,7 +167,7 @@ def audit_since(seconds_ago: int) -> list[dict]:
         f = PATHS.audit_dir / f"{day}.jsonl"
         if not f.exists():
             continue
-        for line in f.read_text().splitlines():
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 evt = json.loads(line)
                 if evt.get("ts", 0) >= cutoff:

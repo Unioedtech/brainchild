@@ -4,4 +4,4 @@ HERE = Path(__file__).parent
 
 
 def load(name: str) -> str:
-    return (HERE / name).read_text()
+    return (HERE / name).read_text(encoding="utf-8")

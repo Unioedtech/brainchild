@@ -123,7 +123,7 @@ def _transcribe_windows_cli(wav: Path, model: Path) -> str:
         raise RuntimeError(f"whisper.exe failed: {proc.stderr[:300]}")
     txt_path = wav.with_suffix(".wav.txt")
     if txt_path.exists():
-        return txt_path.read_text().strip()
+        return txt_path.read_text(encoding="utf-8", errors="replace").strip()
     return proc.stdout.strip()
 
 
