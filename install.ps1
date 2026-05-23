@@ -60,8 +60,10 @@ if (Test-Path (Join-Path $RepoDir ".git")) {
 # pip install
 Say "installing Python deps (user-local)…"
 & python -m pip install --quiet --user --upgrade pip
-& python -m pip install --quiet --user $RepoDir
-if ($LASTEXITCODE -ne 0) { Bail "pip install failed" }
+& python -m pip install --quiet --user --force-reinstall --no-cache-dir --no-deps $RepoDir
+if ($LASTEXITCODE -ne 0) { Bail "pip install (brainchild) failed" }
+& python -m pip install --quiet --user "keyring>=24" "imageio-ffmpeg>=0.4.9" "pypdf>=4.0" "python-docx>=1.1"
+if ($LASTEXITCODE -ne 0) { Bail "pip install (deps) failed" }
 Ok "Python package installed"
 
 # Hand off to wizard

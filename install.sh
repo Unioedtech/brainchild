@@ -80,8 +80,12 @@ fi
 # ---- pip install (local, no sudo) -----------------------------------------
 say "installing Python deps (user-local)…"
 $PY -m pip install --quiet --user --upgrade pip
-$PY -m pip install --quiet --user "$REPO_DIR" 2>&1 | tail -20 || \
-  bail "pip install failed"
+$PY -m pip install --quiet --user --force-reinstall --no-cache-dir --no-deps "$REPO_DIR" 2>&1 | tail -20 || \
+  bail "pip install (brainchild) failed"
+# Deps separately so they're only installed if missing (avoid reinstalling big wheels each run)
+$PY -m pip install --quiet --user \
+  "keyring>=24" "imageio-ffmpeg>=0.4.9" "pypdf>=4.0" "python-docx>=1.1" 2>&1 | tail -20 || \
+  bail "pip install (deps) failed"
 ok "Python package installed"
 
 # ---- hand off to wizard ----------------------------------------------------
