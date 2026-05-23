@@ -57,11 +57,13 @@ def preflight(cfg: "Config | None" = None) -> tuple[bool, str]:
         return True, "claude authenticated"
     err = (proc.stderr or proc.stdout or "")[:400]
     err_low = err.lower()
-    if "login" in err_low or "unauthenticated" in err_low or "auth" in err_low:
+    if "login" in err_low or "unauthenticated" in err_low or "auth" in err_low or "not logged in" in err_low:
         return False, (
-            "claude is installed but NOT authenticated. "
-            "Run `claude` once interactively in a separate terminal, "
-            "complete the browser login, then re-run the wizard."
+            "claude is installed but NOT logged in.\n"
+            "    Fix:  1. In a separate terminal, type:   claude\n"
+            "          2. Inside that shell, type:        /login\n"
+            "          3. Browser opens — log in with your Claude account.\n"
+            "          4. Close that shell (Ctrl+C twice), then re-run the wizard."
         )
     return False, f"claude preflight failed (exit {proc.returncode}): {err.strip()[:300]}"
 
