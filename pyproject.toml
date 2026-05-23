@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brainchild"
-version = "0.1.4"
+version = "0.1.5"
 description = "A personal-agent daemon. One Python process, one Telegram bot, one Claude subscription, zero servers."
 readme = "README.md"
 license = { text = "MIT" }

@@ -21,8 +21,9 @@ AGENT_FILES = (
     "LOG.md", "briefing-recipes.md", "push-back-rules.md",
 )
 
-# Soft cap for the snapshot — keep it lean so per-message prompts stay fast
-SNAPSHOT_MAX_CHARS = 6000
+# Soft cap for the snapshot — keep it lean so per-message prompts stay fast.
+# Bumped to fit CONTEXT-DOCS when present (install-time dropped files).
+SNAPSHOT_MAX_CHARS = 20000
 
 
 def ensure_vault(vault: Path) -> None:
@@ -93,6 +94,20 @@ def build_snapshot(vault: Path, log_tail_lines: int = 30) -> str:
     push_back = read_safe(vault / "agent" / "push-back-rules.md")
     if push_back:
         parts.append("## PUSH-BACK\n" + _trim(push_back, 600))
+
+    # Context index — names of ground-truth docs the bot MUST Read before plans.
+    # We include the INDEX (cheap, <500 bytes) but NOT the doc content (bot
+    # Reads it on demand via Read tool — keeps snapshot light, deep when needed).
+    context_index = read_safe(vault / "agent" / "CONTEXT-INDEX.md")
+    if context_index:
+        parts.append(
+            "## CONTEXT DOCS — ground truth, read before any plan/decision\n"
+            + context_index
+            + "\nThe daemon does NOT inline these in the snapshot. Use the Read "
+              "tool with the paths above whenever building a plan, briefing, "
+              "decision recommendation, or scoreboard update. They are short. "
+              "Reading them is required, not optional."
+        )
 
     log_file = read_safe(vault / "agent" / "LOG.md")
     if log_file:

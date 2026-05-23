@@ -65,17 +65,40 @@ def synthesize(
         total_chars += len(text)
         progress(f"  ✓ {f.name} ({len(text)//1024}KB included)")
 
-    # v1: template path is the DEFAULT. Claude Code CLI cannot reliably emit
-    # structured JSON (verified empirically across many installs). Template
-    # uses every Q&A answer the user provided; daemon learns more via LOG.
-    # Files dropped at install time get stashed in inbox/ for later use.
-    progress("building your vault from Q&A answers")
-    manifest = _fallback_manifest(qa, vault_path)
+    # Architecture:
+    # - Full PDF/doc text → agent/CONTEXT-<slug>.md (verbatim, NEVER truncated)
+    # - Auto-extracted numbers/dates → SCOREBOARD.md targets (always in snapshot)
+    # - PERSONA hard-requires Read of CONTEXT files before plans/decisions
+    # - Snapshot stays lean (~6KB), bot reads CONTEXT on demand via tools
+    progress("reading dropped files")
+    context_files: list[dict[str, Any]] = []   # full verbatim documents
+    auto_facts: list[dict[str, Any]] = []      # extracted numbers/dates
+    for f in files:
+        text = _read_text(f)
+        if not text.strip():
+            progress(f"  ⚠ {f.name} had no extractable text — skipped")
+            continue
+        slug = re.sub(r"[^a-z0-9-]", "-", f.stem.lower())[:50].strip("-") or "doc"
+        context_files.append({
+            "slug": slug,
+            "name": f.name,
+            "text": text,
+        })
+        extracted = _auto_extract_facts(text, f.name)
+        auto_facts.extend(extracted)
+        progress(f"  ✓ {f.name} → CONTEXT-{slug}.md ({len(text)//1024}KB, {len(extracted)} facts extracted)")
 
-    # Stash dropped files into vault inbox so they're not lost
+    progress("building your vault from Q&A + verbatim file contents")
+    manifest = _fallback_manifest(
+        qa, vault_path,
+        context_files=context_files,
+        auto_facts=auto_facts,
+    )
+
+    # Also stash raw files in inbox/ so user can re-reference originals
     inbox = vault_path / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
-    for fb_index, raw_file in enumerate(files):
+    for raw_file in files:
         try:
             dest = inbox / raw_file.name
             if not dest.exists():
@@ -97,6 +120,89 @@ def synthesize(
 def _read_text(path: Path) -> str:
     # Forward to the existing reader below
     return _read_text_impl(path)
+
+
+# ---- Auto-extraction: deterministic regex, no LLM ----------------------------
+
+_RE_RUPEE = re.compile(r"(₹|Rs\.?|INR)\s?([\d,]+(?:\.\d+)?)\s?(cr|crore|lakh|lakhs|L|k|K|M|million)?", re.IGNORECASE)
+_RE_DOLLAR = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)\s?(k|K|M|million|B|billion)?")
+_RE_PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s?%")
+_RE_DATE = re.compile(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?\b|\b\d{4}-\d{2}-\d{2}\b|\bQ[1-4]\s*\d{0,4}\b|\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+_RE_DEADLINE = re.compile(r"(?:by|before|deadline|due|target)[:\s]+([^.\n]{4,80})", re.IGNORECASE)
+_RE_TARGET_LINE = re.compile(r"^[\s\-•*]*([^:\n]+?)[:=]\s*(.+?)$", re.MULTILINE)
+
+
+def _auto_extract_facts(text: str, source: str) -> list[dict[str, Any]]:
+    """Deterministic fact extraction — no LLM. Returns list of dict rows.
+
+    Prefers structured 'Metric: value' lines over loose money regexes,
+    since the former give clean metric names and the latter create noisy
+    rows with phrase fragments as metric names.
+    """
+    facts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(metric: str, value: str, deadline: str = "") -> None:
+        metric = metric.strip().strip("-•* ").rstrip(":")
+        value = value.strip().rstrip(",.")
+        if not metric or not value or len(metric) > 60 or len(value) > 60:
+            return
+        key = (metric + value).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        facts.append({
+            "metric": metric,
+            "value": value,
+            "deadline": deadline.strip()[:30],
+            "source": source,
+        })
+
+    # Pass 1: clean "Metric: value" lines (highest signal)
+    for m in _RE_TARGET_LINE.finditer(text):
+        metric, value = m.group(1), m.group(2)
+        if (any(c.isdigit() for c in value)
+            and len(metric) <= 60 and len(value) <= 60
+            and "http" not in value
+            and not metric.lstrip().startswith("#")):
+            # Try to extract a deadline from value
+            dl_match = _RE_DATE.search(value)
+            deadline = dl_match.group(0) if dl_match else ""
+            add(metric, value, deadline)
+
+    # Pass 2: bullet lines with ₹/$ — only if not already captured
+    for line in text.split("\n"):
+        line_str = line.strip().lstrip("-•* ")
+        if not line_str or len(line_str) > 120:
+            continue
+        money_match = _RE_RUPEE.search(line_str) or _RE_DOLLAR.search(line_str)
+        if not money_match:
+            continue
+        # Split on the money: text before = metric, text including money = value
+        prefix = line_str[:money_match.start()].rstrip(":= ").strip()
+        if not prefix or len(prefix) > 60:
+            continue
+        value = line_str[money_match.start():].strip()
+        dl_match = _RE_DATE.search(value)
+        deadline = dl_match.group(0) if dl_match else ""
+        add(prefix, value, deadline)
+
+    return facts[:25]  # cap
+
+
+def _surrounding_phrase(text: str, start: int, end: int, window: int = 40) -> str:
+    """Grab a short phrase around a regex match for context."""
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    phrase = text[left:right]
+    # Trim to nearest sentence-ish boundary
+    if left > 0:
+        nl = phrase.find(" ")
+        phrase = phrase[nl + 1:] if nl != -1 else phrase
+    if right < len(text):
+        nl = phrase.rfind(" ")
+        phrase = phrase[:nl] if nl != -1 else phrase
+    return phrase.strip().replace("\n", " ")[:80]
 
 
 def _read_text_impl(path: Path) -> str:
@@ -274,7 +380,12 @@ def _section(text: str, header: str) -> str:
 
 # ---- Fallback template (when Claude call fails) ------------------------------
 
-def _fallback_manifest(qa: dict[str, Any], vault_path: Path) -> dict:
+def _fallback_manifest(
+    qa: dict[str, Any],
+    vault_path: Path,
+    context_files: list[dict[str, Any]] | None = None,
+    auto_facts: list[dict[str, Any]] | None = None,
+) -> dict:
     """Build a minimal but valid vault from Q&A alone. No LLM call."""
     name = (qa.get("identity") or {}).get("name") or "<unknown>"
     role = (qa.get("identity") or {}).get("role") or "<unknown — fill in>"
@@ -291,6 +402,23 @@ def _fallback_manifest(qa: dict[str, Any], vault_path: Path) -> dict:
 
     push_back_list = "\n".join(f"- {p}" for p in push_back) if push_back else "- <none specified>"
 
+    context_files = context_files or []
+    auto_facts = auto_facts or []
+    has_ctx = bool(context_files)
+    ctx_filenames = [f"agent/CONTEXT-{c['slug']}.md" for c in context_files]
+    ctx_pointer = (
+        "\n## REQUIRED READING — non-negotiable\n"
+        "Before generating ANY daily plan, briefing, decision recommendation, "
+        "scoreboard update, or strategic advice, you MUST use the Read tool to "
+        "load these files. They contain the user's playbook, financial "
+        "guardrails, decision rules, vendor rules, target numbers — the ground "
+        "truth that every plan must respect:\n"
+        + "\n".join(f"  - {p}" for p in ctx_filenames)
+        + "\n\nDo NOT shortcut. Do NOT rely on memory of these files between "
+        "messages — Read them every time you build a plan. They are SHORT "
+        "documents; reading them is cheap.\n"
+        if has_ctx else ""
+    )
     persona = f"""---
 type: persona
 owner: {name}
@@ -303,7 +431,7 @@ owner: {name}
 - Role: {role}
 
 ## Voice
-- Tone: <fill in — terse / warm / formal / etc.>
+- Tone: derived from CONTEXT-DOCS.md if present; else <fill in by hand>
 - Forbidden phrases: <fill in if any>
 
 ## How to be
@@ -318,6 +446,7 @@ owner: {name}
 
 ## Domain context
 - Day-to-day: {day_to_day}
+{ctx_pointer}
 """
 
     live = f"""---
@@ -363,6 +492,16 @@ type: backlog
 - <none>
 """
 
+    target_rows = []
+    if numbers.strip():
+        target_rows.append(f"| qa.numbers (raw) | — | — | — | install Q&A |")
+    for fact in auto_facts:
+        target_rows.append(
+            f"| {fact['metric']} | — | {fact['value']} | {fact['deadline']} | {fact['source']} |"
+        )
+    if not target_rows:
+        target_rows.append("| <fill in> | <?> | <?> | <?> | qa.numbers |")
+
     scoreboard = f"""---
 type: scoreboard
 ---
@@ -372,15 +511,15 @@ type: scoreboard
 ## Targets
 | Metric | Current | Target | Deadline | Source |
 |---|---|---|---|---|
-| <fill in> | <?> | <?> | <?> | qa.numbers |
+{chr(10).join(target_rows)}
 
 ## Streaks / cadence
 - <none yet>
 
 ## Pressure clocks
-- <fill in>
+- <fill in — see CONTEXT-*.md for deadlines and runway constraints>
 
-<!-- Raw numbers from install Q&A:
+<!-- Raw user-typed numbers from install Q&A:
 {numbers}
 -->
 """
@@ -392,34 +531,40 @@ type: scoreboard
     precraft = rhythm.get("precraft") or "21:00"
     night = rhythm.get("night") or "23:30"
 
+    ctx_read_line = (
+        "- BEFORE generating this briefing, you MUST Read every agent/CONTEXT-*.md "
+        "file. They define the playbook, financial guardrails, and decision rules "
+        "every priority must respect.\n"
+        if has_ctx else ""
+    )
     briefings = f"""# Briefing recipes
 
 ## AM
 - Fires: {am}
-- Lead with: top 3 from LIVE Today
+{ctx_read_line}- Lead with: top 3 priorities for today, derived from LIVE Today + CONTEXT-*.md guardrails
 - Ask: What's the single hardest thing today?
-- Avoid: yesterday's noise
+- Avoid: yesterday's noise; suggestions that violate guardrails in CONTEXT-*.md
 - Tone: brisk
 
 ## Midday
 - Fires: {midday}
-- Lead with: drift from Today
+{ctx_read_line}- Lead with: drift from Today
 - Ask: Still on the top item?
-- Avoid: new ideas
+- Avoid: new ideas (those go to BACKLOG)
 - Tone: audit
 
 ## Pre-craft
 - Fires: {precraft}
-- Lead with: which stream gets deep time
+- Lead with: which stream gets deep time + 3 lines of context for it
 - Ask: <none>
-- Avoid: status
+- Avoid: status, numbers, anything that breaks state
 - Tone: silent runway
 
 ## Night
 - Fires: {night}
-- Lead with: shipped vs slipped
+{ctx_read_line}- Lead with: shipped vs slipped — check against CONTEXT-*.md targets
 - Ask: push-back for tomorrow?
-- Avoid: scoreboards if bad day
+- Avoid: scoreboards if bad day — name it once, move on
 - Tone: honest, short
 """
 
@@ -459,6 +604,27 @@ type: scoreboard
         {"path": "agent/briefing-recipes.md", "content": briefings},
         {"path": "agent/push-back-rules.md", "content": push_rules},
     ]
+
+    # One CONTEXT file per dropped doc — verbatim, never truncated.
+    # PERSONA + briefing-recipes hard-require the bot to Read these before
+    # any plan/decision. They're at the vault root so Read with relative
+    # path "agent/CONTEXT-<slug>.md" works from cwd=vault_path.
+    for cf in context_files:
+        body = (
+            f"---\ntype: context-doc\nsource: {cf['name']}\n---\n\n"
+            f"# {cf['name']}\n\n"
+            f"<!-- VERBATIM CONTENT — this is ground truth. Read in full before any plan. -->\n\n"
+            f"{cf['text']}\n"
+        )
+        files.append({"path": f"agent/CONTEXT-{cf['slug']}.md", "content": body})
+
+    # Also write an INDEX so the bot can discover all CONTEXT files at once.
+    if context_files:
+        index_lines = ["---", "type: context-index", "---", "", "# Context index", "",
+                       "All ground-truth documents. The bot MUST Read these before plans/decisions.", ""]
+        for cf in context_files:
+            index_lines.append(f"- agent/CONTEXT-{cf['slug']}.md ({cf['name']}, {len(cf['text'])//1024}KB)")
+        files.append({"path": "agent/CONTEXT-INDEX.md", "content": "\n".join(index_lines) + "\n"})
     for s in streams:
         files.append({
             "path": f"streams/{s['slug']}/README.md",
