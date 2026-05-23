@@ -326,6 +326,16 @@ def _step_12_synthesize_and_finish(state: dict) -> None:
     cfg = _build_config(state)
     _write_config(cfg)
 
+    # Pre-flight: verify claude is actually authenticated
+    print("\n  Checking Claude Code authentication…")
+    ok, msg = claude_runner.preflight(cfg)
+    if not ok:
+        print(f"  ✗ {msg}")
+        print("\n  Wizard saved your progress. After you fix the above,")
+        print("  re-run:  python -m brainchild install")
+        sys.exit(2)
+    print(f"  ✓ {msg}")
+
     print("\n  Running synthesis (one Claude call per file + one for the vault)…")
     print("  Typical time: 60-120s.\n")
 

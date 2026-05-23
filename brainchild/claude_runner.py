@@ -36,6 +36,36 @@ def resolve_bin(name: str = "claude") -> str:
     return path
 
 
+def preflight(cfg: "Config | None" = None) -> tuple[bool, str]:
+    """Verify claude is installed AND authenticated. Returns (ok, message)."""
+    try:
+        claude_bin = resolve_bin(cfg.claude_bin if cfg else "claude")
+    except ClaudeNotFound as e:
+        return False, str(e)
+    # Lightweight test prompt
+    try:
+        proc = subprocess.run(
+            [claude_bin, "-p", "ping",
+             "--model", "haiku",
+             "--dangerously-skip-permissions"],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(Path.home()),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "claude preflight timed out — network or login issue"
+    if proc.returncode == 0:
+        return True, "claude authenticated"
+    err = (proc.stderr or proc.stdout or "")[:400]
+    err_low = err.lower()
+    if "login" in err_low or "unauthenticated" in err_low or "auth" in err_low:
+        return False, (
+            "claude is installed but NOT authenticated. "
+            "Run `claude` once interactively in a separate terminal, "
+            "complete the browser login, then re-run the wizard."
+        )
+    return False, f"claude preflight failed (exit {proc.returncode}): {err.strip()[:300]}"
+
+
 def run(
     prompt: str,
     cfg: Config,
