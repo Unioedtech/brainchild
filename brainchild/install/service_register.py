@@ -122,6 +122,8 @@ def _unregister_linux() -> None:
 # ---- Windows ----------------------------------------------------------------
 
 def _register_windows() -> None:
+    # Prefer pythonw.exe (no console) but fall back to python.exe.
+    # Microsoft Store Python and some venv setups don't ship pythonw.
     pythonw = sys.executable.replace("python.exe", "pythonw.exe")
     if not Path(pythonw).exists():
         pythonw = sys.executable

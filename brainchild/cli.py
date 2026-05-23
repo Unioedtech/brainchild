@@ -19,6 +19,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("daemon", help="run daemon in foreground (default)")
     sub.add_parser("install", help="run the install wizard")
     sub.add_parser("status", help="show daemon state")
+    sub.add_parser("start", help="start the scheduled daemon (also `start /background`)")
+    sub.add_parser("stop", help="stop the running daemon")
+    sub.add_parser("logs", help="tail the daemon log file")
     sub.add_parser("pause", help="pause processing")
     sub.add_parser("resume", help="resume processing")
     ask = sub.add_parser("ask", help="one-shot prompt to your bot")
@@ -56,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
         security.resume()
         print("resumed.")
         return 0
+    if cmd == "start":
+        return _start_daemon()
+    if cmd == "stop":
+        return _stop_daemon()
+    if cmd == "logs":
+        return _logs()
     if cmd == "ask":
         return _ask(" ".join(args.text))
     if cmd == "audit":
@@ -113,6 +122,55 @@ def _audit(args) -> int:
         return 0
     print("usage: brainchild audit {tail [-n N] | since DURATION}")
     return 1
+
+
+def _start_daemon() -> int:
+    """Start the registered service in the background."""
+    import subprocess as sp
+    if sys.platform == "darwin":
+        r = sp.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/sh.brainchild.daemon"],
+                   capture_output=True, text=True)
+        print(r.stdout or r.stderr or "daemon started.")
+        return r.returncode
+    if sys.platform == "linux":
+        r = sp.run(["systemctl", "--user", "restart", "brainchild"],
+                   capture_output=True, text=True)
+        print(r.stdout or r.stderr or "daemon started.")
+        return r.returncode
+    if sys.platform == "win32":
+        r = sp.run(["schtasks", "/Run", "/TN", "Brainchild"], capture_output=True, text=True)
+        print(r.stdout or r.stderr or "daemon started.")
+        return r.returncode
+    return 1
+
+
+def _stop_daemon() -> int:
+    """Stop the running service."""
+    import subprocess as sp
+    if sys.platform == "darwin":
+        r = sp.run(["launchctl", "kill", "TERM", f"gui/{os.getuid()}/sh.brainchild.daemon"],
+                   capture_output=True, text=True)
+    elif sys.platform == "linux":
+        r = sp.run(["systemctl", "--user", "stop", "brainchild"], capture_output=True, text=True)
+    elif sys.platform == "win32":
+        r = sp.run(["schtasks", "/End", "/TN", "Brainchild"], capture_output=True, text=True)
+    else:
+        print("unsupported platform")
+        return 1
+    print(r.stdout or r.stderr or "daemon stopped.")
+    return r.returncode
+
+
+def _logs() -> int:
+    log_file = PATHS.logs_dir / "daemon.log"
+    if not log_file.exists():
+        print(f"(no log yet at {log_file})")
+        return 0
+    # Print last 60 lines
+    lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]
+    for line in lines:
+        print(line)
+    return 0
 
 
 def _parse_duration(s: str) -> int:
