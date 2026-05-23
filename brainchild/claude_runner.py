@@ -106,6 +106,8 @@ def run(
             input=prompt,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=cfg.claude_timeout_sec,
             cwd=str(cwd),
         )

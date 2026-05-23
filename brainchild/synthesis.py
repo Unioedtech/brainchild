@@ -134,13 +134,12 @@ def _chunk(text: str) -> list[str]:
 def _read_text(path: Path) -> str:
     try:
         if path.suffix.lower() in (".md", ".txt", ".markdown", ".org"):
-            return path.read_text(errors="replace")
+            return path.read_text(encoding="utf-8", errors="replace")
         if path.suffix.lower() == ".pdf":
             return _read_pdf(path)
         if path.suffix.lower() in (".docx",):
             return _read_docx(path)
-        # Best-effort text read for unknown extensions
-        return path.read_text(errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         log.warning("read %s failed: %s", path, e)
         return ""
@@ -181,9 +180,10 @@ def _call_architect(qa: dict[str, Any], digests: list[dict], cfg: Config) -> dic
         user, cfg, trigger="synth-architect",
         cwd=Path.home(), system_prompt=system_prompt,
     )
+    log.info("architect raw output (first 800c): %s", (out or "")[:800])
     parsed = _extract_json(out)
     if not parsed:
-        raise SynthesisError(f"architect returned unparseable output: {out[:400]}")
+        raise SynthesisError(f"architect returned unparseable output: {out[:600]}")
     return parsed
 
 
@@ -236,7 +236,12 @@ def _validate(manifest: dict) -> None:
         raise SynthesisError("manifest is not an object")
     for k in ("streams", "files", "warnings"):
         if k not in manifest:
-            raise SynthesisError(f"manifest missing key: {k}")
+            keys = list(manifest.keys())
+            raise SynthesisError(
+                f"manifest missing key: {k}. got keys: {keys}. "
+                f"(this usually means Claude returned the wrong shape — "
+                f"retry the wizard, or check ~/.brainchild/logs/daemon.log)"
+            )
 
     files = {f["path"]: f["content"] for f in manifest["files"]}
 
