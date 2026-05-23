@@ -76,6 +76,7 @@ def run(
     extra_args: Iterable[str] | None = None,
     cwd: Path | None = None,
     system_prompt: str | None = None,
+    timeout_override: int | None = None,
 ) -> str:
     """Invoke claude -p reading prompt from stdin (avoids OS arg-length limits).
 
@@ -88,16 +89,20 @@ def run(
         cwd.mkdir(parents=True, exist_ok=True)
 
     event_id = uuid.uuid4().hex[:12]
-    args = [
-        claude_bin, "-p",
-        "--model", cfg.claude_model,
+    # --model from extra_args wins if caller overrides; otherwise use cfg default
+    extra_args = list(extra_args or [])
+    model_override = "--model" in extra_args
+    args = [claude_bin, "-p"]
+    if not model_override:
+        args.extend(["--model", cfg.claude_model])
+    args.extend([
         "--settings", str(PATHS.settings_daemon),
         "--dangerously-skip-permissions",
-    ]
+    ])
     if system_prompt:
         args.extend(["--append-system-prompt", system_prompt])
-    if extra_args:
-        args.extend(extra_args)
+    args.extend(extra_args)
+    timeout = timeout_override or cfg.claude_timeout_sec
 
     started = time.monotonic()
     try:
@@ -108,7 +113,7 @@ def run(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=cfg.claude_timeout_sec,
+            timeout=timeout,
             cwd=str(cwd),
         )
     except subprocess.TimeoutExpired as e:

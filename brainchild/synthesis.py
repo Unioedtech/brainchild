@@ -1,15 +1,22 @@
 """Vault synthesis: Q&A + dropped files → fully populated vault.
 
 Two-phase:
-  A. Per-file digest (parallel claude calls, one per chunk) → file-level summary
-  B. Vault architect (single claude call) → JSON manifest → files on disk
+  A. Per-file digest (one Haiku call per file, sequential) → file-level summary
+  B. Vault architect (one Opus call) → JSON manifest → files on disk
+
+Design choices:
+- Haiku for digests because extracting identity/priorities from text doesn't
+  need Opus and Haiku is ~10× faster on the Pro plan.
+- One call per file (not chunked). Files truncated to MAX_FILE_CHARS.
+- Sequential to avoid Pro-tier rate-limit spikes.
+- A failing digest is skipped with a warning — never blocks the architect.
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +25,11 @@ from brainchild.config import Config
 
 log = logging.getLogger("brainchild.synthesis")
 
-CHUNK_CHARS = 24_000          # ~6k tokens
-CHUNK_OVERLAP = 800
-MAX_FILE_PARALLEL = 3
+MAX_FILE_CHARS = 60_000       # truncate large files; tail rarely adds signal
+DIGEST_TIMEOUT_SEC = 90       # Haiku is fast; 90s is generous
+ARCHITECT_TIMEOUT_SEC = 240   # Opus + bigger context, allow up to 4 min
+DIGEST_MODEL = "haiku"
+ARCHITECT_MODEL = "opus"
 
 
 class SynthesisError(RuntimeError):
@@ -41,19 +50,24 @@ def synthesize(
         if progress_cb:
             progress_cb(msg)
 
-    # Phase A: per-file digests
+    # Phase A: per-file digests — Haiku, sequential, one call per file
     digests: list[dict[str, Any]] = []
     for f in files:
+        started = time.monotonic()
         try:
             progress(f"reading {f.name}")
             digest = _digest_file(f, cfg)
             if digest:
                 digests.append({"name": f.name, "digest": digest})
+                progress(f"  ✓ {f.name} digested in {int(time.monotonic() - started)}s")
+            else:
+                progress(f"  ⚠ {f.name} produced no signal — skipped")
         except Exception as e:
             log.warning("digest failed for %s: %s", f, e)
+            progress(f"  ⚠ {f.name} digest failed ({type(e).__name__}) — skipped, continuing")
 
-    # Phase B: synthesis
-    progress("composing vault")
+    # Phase B: synthesis — Opus, single call
+    progress(f"composing vault from Q&A + {len(digests)} file digest(s)")
     manifest = _call_architect(qa, digests, cfg)
 
     # Phase C: validate
@@ -70,65 +84,23 @@ def synthesize(
 # ---- Phase A: per-file digest ------------------------------------------------
 
 def _digest_file(path: Path, cfg: Config) -> dict[str, Any]:
+    """One Haiku call per file. Truncate over MAX_FILE_CHARS."""
     text = _read_text(path)
-    if not text:
+    if not text.strip():
         return {}
-    chunks = _chunk(text)
+    if len(text) > MAX_FILE_CHARS:
+        text = text[:MAX_FILE_CHARS]
+        log.info("truncated %s to %d chars", path.name, MAX_FILE_CHARS)
     digest_prompt = prompts.load("file_digest.txt")
-    chunk_results: list[dict[str, Any]] = []
-
-    with ThreadPoolExecutor(max_workers=MAX_FILE_PARALLEL) as pool:
-        futures = [
-            pool.submit(_digest_chunk, digest_prompt, chunk, cfg)
-            for chunk in chunks
-        ]
-        for fut in as_completed(futures):
-            try:
-                d = fut.result()
-                if d:
-                    chunk_results.append(d)
-            except Exception as e:
-                log.warning("chunk digest failed: %s", e)
-
-    merged = _merge_digests(chunk_results)
-    return merged
-
-
-def _digest_chunk(system_prompt: str, chunk: str, cfg: Config) -> dict[str, Any]:
-    user = f"<chunk>\n{chunk}\n</chunk>"
+    user = f"<file name=\"{path.name}\">\n{text}\n</file>"
     out = claude_runner.run(
         user, cfg, trigger="synth-digest",
-        cwd=Path.home(), system_prompt=system_prompt,
+        cwd=Path.home(),
+        system_prompt=digest_prompt,
+        extra_args=["--model", DIGEST_MODEL],
+        timeout_override=DIGEST_TIMEOUT_SEC,
     )
     return _extract_json(out)
-
-
-def _merge_digests(chunks: list[dict[str, Any]]) -> dict[str, Any]:
-    keys = ("identity_signals", "priorities", "numbers", "deadlines",
-            "rhythm", "voice_samples", "vocabulary", "never_go_there")
-    merged: dict[str, list] = {k: [] for k in keys}
-    for c in chunks:
-        for k in keys:
-            for item in (c.get(k) or [])[:6]:
-                if item not in merged[k]:
-                    merged[k].append(item)
-    for k in keys:
-        merged[k] = merged[k][:12]
-    return merged
-
-
-def _chunk(text: str) -> list[str]:
-    if len(text) <= CHUNK_CHARS:
-        return [text]
-    out = []
-    i = 0
-    while i < len(text):
-        end = min(i + CHUNK_CHARS, len(text))
-        out.append(text[i:end])
-        if end >= len(text):
-            break
-        i = end - CHUNK_OVERLAP
-    return out
 
 
 def _read_text(path: Path) -> str:
@@ -178,7 +150,10 @@ def _call_architect(qa: dict[str, Any], digests: list[dict], cfg: Config) -> dic
     )
     out = claude_runner.run(
         user, cfg, trigger="synth-architect",
-        cwd=Path.home(), system_prompt=system_prompt,
+        cwd=Path.home(),
+        system_prompt=system_prompt,
+        extra_args=["--model", ARCHITECT_MODEL],
+        timeout_override=ARCHITECT_TIMEOUT_SEC,
     )
     log.info("architect raw output (first 800c): %s", (out or "")[:800])
     parsed = _extract_json(out)
