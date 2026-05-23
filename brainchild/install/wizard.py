@@ -398,19 +398,30 @@ def _build_config(state: dict) -> Config:
 
 
 def _write_config(cfg: Config) -> None:
+    """Write config.toml using TOML LITERAL strings (single quotes).
+
+    Double-quoted TOML strings interpret backslash escapes — so a Windows
+    path like C:\\Users\\mahaj writes as "C:\\Users\\..." which TOML reads
+    as \\U... = unicode escape = parse error.  Literal strings ('...')
+    skip escape processing entirely.
+    """
     PATHS.config_file.parent.mkdir(parents=True, exist_ok=True)
+    def lit(s: str) -> str:
+        # Literal strings can't contain a single quote. None known here,
+        # but guard by converting any to underscore as a last-resort.
+        return "'" + str(s).replace("'", "_") + "'"
     lines = [
-        f'vault_path = "{cfg.vault_path}"',
-        f'claude_model = "{cfg.claude_model}"',
+        f'vault_path = {lit(cfg.vault_path)}',
+        f'claude_model = {lit(cfg.claude_model)}',
         f'claude_timeout_sec = {cfg.claude_timeout_sec}',
         f'owner_chat_id = {cfg.owner_chat_id}',
         f'voice_enabled = {str(cfg.voice_enabled).lower()}',
     ]
-    if cfg.briefing_am: lines.append(f'briefing_am = "{cfg.briefing_am}"')
-    if cfg.briefing_midday: lines.append(f'briefing_midday = "{cfg.briefing_midday}"')
-    if cfg.briefing_precraft: lines.append(f'briefing_precraft = "{cfg.briefing_precraft}"')
-    if cfg.briefing_night: lines.append(f'briefing_night = "{cfg.briefing_night}"')
-    lines.append(f'day_rollover = "{cfg.day_rollover}"')
+    if cfg.briefing_am: lines.append(f'briefing_am = {lit(cfg.briefing_am)}')
+    if cfg.briefing_midday: lines.append(f'briefing_midday = {lit(cfg.briefing_midday)}')
+    if cfg.briefing_precraft: lines.append(f'briefing_precraft = {lit(cfg.briefing_precraft)}')
+    if cfg.briefing_night: lines.append(f'briefing_night = {lit(cfg.briefing_night)}')
+    lines.append(f'day_rollover = {lit(cfg.day_rollover)}')
     PATHS.config_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
