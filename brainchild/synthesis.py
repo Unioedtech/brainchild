@@ -95,8 +95,11 @@ def _digest_file(path: Path, cfg: Config) -> dict[str, Any]:
 
 
 def _digest_chunk(system_prompt: str, chunk: str, cfg: Config) -> dict[str, Any]:
-    full = f"{system_prompt}\n\n<chunk>\n{chunk}\n</chunk>"
-    out = claude_runner.run(full, cfg, trigger="synth-digest", cwd=Path.home())
+    user = f"<chunk>\n{chunk}\n</chunk>"
+    out = claude_runner.run(
+        user, cfg, trigger="synth-digest",
+        cwd=Path.home(), system_prompt=system_prompt,
+    )
     return _extract_json(out)
 
 
@@ -171,10 +174,13 @@ def _call_architect(qa: dict[str, Any], digests: list[dict], cfg: Config) -> dic
     digests_block = json.dumps(digests, indent=2)
     user = (
         f"<qa>\n{qa_block}\n</qa>\n\n"
-        f"<files>\n{digests_block}\n</files>"
+        f"<files>\n{digests_block}\n</files>\n\n"
+        f"Emit the JSON object now."
     )
-    full = f"{system_prompt}\n\n{user}"
-    out = claude_runner.run(full, cfg, trigger="synth-architect", cwd=Path.home())
+    out = claude_runner.run(
+        user, cfg, trigger="synth-architect",
+        cwd=Path.home(), system_prompt=system_prompt,
+    )
     parsed = _extract_json(out)
     if not parsed:
         raise SynthesisError(f"architect returned unparseable output: {out[:400]}")

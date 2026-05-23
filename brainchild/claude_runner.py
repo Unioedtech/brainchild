@@ -75,8 +75,13 @@ def run(
     trigger: str = "tg",
     extra_args: Iterable[str] | None = None,
     cwd: Path | None = None,
+    system_prompt: str | None = None,
 ) -> str:
-    """Invoke claude -p. Returns stdout. Raises on auth/timeout/crash."""
+    """Invoke claude -p reading prompt from stdin (avoids OS arg-length limits).
+
+    On Windows cmd, -p "<huge string>" fails with 'command line is too long'.
+    Piping via stdin sidesteps that entirely and works identically on every OS.
+    """
     claude_bin = resolve_bin(cfg.claude_bin)
     cwd = cwd or cfg.vault_path
     if not cwd.exists():
@@ -84,11 +89,13 @@ def run(
 
     event_id = uuid.uuid4().hex[:12]
     args = [
-        claude_bin, "-p", prompt,
+        claude_bin, "-p",
         "--model", cfg.claude_model,
         "--settings", str(PATHS.settings_daemon),
         "--dangerously-skip-permissions",
     ]
+    if system_prompt:
+        args.extend(["--append-system-prompt", system_prompt])
     if extra_args:
         args.extend(extra_args)
 
@@ -96,6 +103,7 @@ def run(
     try:
         proc = subprocess.run(
             args,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=cfg.claude_timeout_sec,
