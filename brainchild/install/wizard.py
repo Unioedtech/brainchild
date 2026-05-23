@@ -157,8 +157,26 @@ def _step_2_vault(state: dict) -> None:
         return
     _header(2, "Vault location")
     print(f"  Where should your vault live? (default: {DEFAULT_VAULT})")
-    v = _single_line()
-    state["vault_path"] = str(Path(v).expanduser()) if v else str(DEFAULT_VAULT)
+    print(f"  Press Enter for default, or paste an absolute path.")
+    home = Path.home().resolve()
+    while True:
+        v = _single_line()
+        if not v:
+            target = Path(DEFAULT_VAULT)
+            break
+        candidate = Path(v).expanduser()
+        if not candidate.is_absolute():
+            # Treat relative input as a folder under home (never write to cwd)
+            candidate = home / candidate.name
+            print(f"  → interpreted as: {candidate}")
+        try:
+            candidate.resolve().relative_to(home)
+        except ValueError:
+            print(f"  ✗ vault must live under {home}. Try again.")
+            continue
+        target = candidate
+        break
+    state["vault_path"] = str(target)
     state["answers"]["vault_path"] = state["vault_path"]
     _save(state, "vault")
 

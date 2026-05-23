@@ -100,7 +100,7 @@ def run(
         "--dangerously-skip-permissions",
     ])
     if system_prompt:
-        args.extend(["--append-system-prompt", system_prompt])
+        args.extend(["--system-prompt", system_prompt])
     args.extend(extra_args)
     timeout = timeout_override or cfg.claude_timeout_sec
 
