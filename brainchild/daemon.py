@@ -15,6 +15,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import subprocess
+
 from brainchild import claude_runner, scheduler as sched_mod, tg, vault
 from brainchild.config import PATHS, Config, is_paused
 from brainchild.security import (
@@ -77,9 +79,12 @@ def _sweep_tmp() -> None:
 def _handle_message(client: tg.TGClient, cfg: Config, msg: dict) -> None:
     chat_id = msg.get("chat", {}).get("id")
     text = (msg.get("text") or "").strip()
+    log.info("msg in chat_id=%s text=%r voice=%s doc=%s photo=%s",
+             chat_id, text[:80], "voice" in msg, "document" in msg, "photo" in msg)
 
     if cfg.owner_chat_id is not None and chat_id != cfg.owner_chat_id:
-        log.warning("ignored msg from non-owner chat_id=%s", chat_id)
+        log.warning("ignored msg: owner=%s actual=%s — set owner_chat_id correctly in config.toml",
+                    cfg.owner_chat_id, chat_id)
         return
 
     # Inline commands (no LLM)
@@ -117,18 +122,33 @@ def _handle_message(client: tg.TGClient, cfg: Config, msg: dict) -> None:
         return
 
     snapshot = vault.read_safe(PATHS.snapshot)
+    if not snapshot:
+        log.warning("no snapshot yet — building one synchronously")
+        try:
+            vault.write_snapshot(cfg.vault_path)
+            snapshot = vault.read_safe(PATHS.snapshot)
+        except Exception:
+            log.exception("snapshot build failed")
     prompt = claude_runner.compose_prompt(snapshot, text)
+    log.info("invoking claude prompt_chars=%d model=%s timeout=%ds",
+             len(prompt), cfg.claude_model, cfg.claude_timeout_sec)
     started = time.time()
     try:
         with client.typing(chat_id):
             reply = claude_runner.run(prompt, cfg, trigger="tg")
     except claude_runner.ClaudeAuthExpired:
-        client.send(chat_id, "Claude session expired on the host laptop. Run `claude login` there.")
+        log.error("claude auth expired during message handle")
+        client.send(chat_id, "Claude session expired on the host laptop. Run `claude` then /login there.")
+        return
+    except subprocess.TimeoutExpired:
+        log.error("claude timed out after %ds", cfg.claude_timeout_sec)
+        client.send(chat_id, f"Claude took longer than {cfg.claude_timeout_sec}s — likely rate-limited on your tier. Try again in a minute.")
         return
     except Exception as e:
         log.exception("claude run failed")
-        client.send(chat_id, f"Something broke: {e}")
+        client.send(chat_id, f"Something broke: {type(e).__name__}: {e}")
         return
+    log.info("claude reply_chars=%d duration=%ds", len(reply), int(time.time() - started))
 
     dur = int(time.time() - started)
     if reply.strip():
@@ -298,7 +318,7 @@ def run() -> None:
         except Exception:
             log.exception("hello send failed")
 
-    log.info("loop start jobs=%d", len(sched.jobs))
+    log.info("loop start jobs=%d owner_chat_id=%s", len(sched.jobs), cfg.owner_chat_id)
     while not _shutdown.is_set():
         if is_paused():
             _shutdown.wait(2)
@@ -306,6 +326,8 @@ def run() -> None:
         try:
             sched.tick()
             updates = client.poll()
+            if updates:
+                log.info("poll returned %d updates", len(updates))
             for u in updates:
                 msg = u.get("message")
                 if msg:
