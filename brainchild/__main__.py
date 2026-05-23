@@ -1,4 +1,5 @@
-from brainchild.daemon import run
+import sys
+from brainchild.cli import main
 
 if __name__ == "__main__":
-    run()
+    sys.exit(main())
